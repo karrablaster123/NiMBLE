@@ -1,0 +1,86 @@
+Screen {
+    layout: grid;
+    grid-size: 3;
+    padding: 2;
+    background: #181818;
+}
+
+Header {
+  dock: top;
+  height: 3;
+  content-align: center middle;
+  background: #181818;
+  color: white;
+}
+
+#flow {
+    width: 100%;
+    height: 100%;
+    column-span: 2;
+    text-align: center;
+    margin: 0 40;
+    border: round grey;
+    content-align: center middle;
+    text-style: bold;
+}
+
+Static {
+    height: 50%;
+}
+
+#spark {
+    width: 100%;
+    height: 100%;
+    column-span: 2;
+    margin: 0 40;
+    content-align: center middle;
+}
+
+#spark > .sparkline--max-color {
+    color: $accent;
+}
+#spark > .sparkline--min-color {
+    color: $accent 30%;
+}
+
+
+#weight {
+    width: 100%;
+    height: 100%;
+    column-span: 2;
+    text-align: center;
+    margin: 0 40;
+    border: round grey;
+    content-align: center middle;
+    text-style: bold;
+}
+
+Button {
+    width: 100%;
+    margin: 1 20;
+    text-align: center;
+    content-align: center middle;
+}
+
+#status {
+    width: 100%;
+    height: 100%;
+    column-span: 3;
+    text-align: center;
+}
+
+#details {
+    width: 100%;
+    height: 100%;
+    column-span: 3;
+    text-align: center;
+    content-align: center bottom;
+}
+
+Label {
+    width: 100%;
+    height: 100%;
+    text-align: right;
+    content-align: center middle;
+    text-style: bold;
+}
