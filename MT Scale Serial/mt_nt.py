@@ -14,10 +14,10 @@ from textual.widgets import (
     Sparkline
 )
 
-PORT = "COM11" # Windows COM Port. (Found from Device Manager)
+PORT = "COM11"
 BAUDRATE = 9600
-INTERVAL = 5  # seconds
-
+INTERVAL = 30*60 # 30*60 seconds (30 min)
+FLOWRATE_FRAME = 24 # 24 * 30 minutes is 12 hours.
 
 def get_valid_filename(filename) -> Path:
     n = 0
@@ -55,12 +55,12 @@ def get_stat(r: str) -> tuple[int, str]:
 
 
 DATE = datetime.now().strftime("%Y-%m-%d")
-OUT_FILE = get_valid_filename(DATE)
 WEIGHT_RE = re.compile(r"(\d+\.\d+) kg")
 
 
 class FlowRateApp(App):
     CSS_PATH = "mt.tcss"
+    OUT_FILE = get_valid_filename(DATE)
 
     def __init__(self):
         super().__init__()
@@ -76,7 +76,8 @@ class FlowRateApp(App):
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
                 )
-        self.weights: list[float] = [0.0]
+        self.weights = []
+        self.flowrates = [[], []] # flowrates(12 hr), flowrates(2hr)
         self.n_measurements = 0
 
     def __del__(self):
@@ -95,11 +96,16 @@ class FlowRateApp(App):
             button.label = "Start"
             button.variant = "success"
             self.update_weight.pause()
+    
+    def get_new_outfile(self):
+        self.OUT_FILE = get_valid_filename(DATE)
+        self.outfile = open(self.OUT_FILE, "w")
+        self.outfile.write("Date & Time, Mass (g), Flowrate (g/hr), Flowrate(2hr) (g/hr), Note\n")
+        
 
     def read_weight(self):
         if self.outfile is None:
-            self.outfile = open(OUT_FILE, "w")
-            self.outfile.write("Date & Time, Mass (kg), Flowrate (g/s)\n")
+            self.get_new_outfile()
         response = read_weight(self.ser)
         curr_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if response == "":
@@ -115,13 +121,27 @@ class FlowRateApp(App):
                 return
             matches = WEIGHT_RE.search(response)
             assert(matches is not None)
-            weight = float(matches.groups()[0])
+            weight = round(float(matches.groups()[0])*1000.0, 1) # kg to g
             flowrate = -100000
-            if len(self.weights) > 1:
-                flowrate = (weight - self.weights[-1]) / INTERVAL
+            flowrate_2 = -100000
+            note = ""
+            if len(self.weights) > 0 and weight - self.weights[-1] < -1000:
+                self.weights.clear()
+                note = "EFFCLEAR"
+            if len(self.weights) >= 24:
+                flowrate = (weight - self.weights[-FLOWRATE_FRAME]) / (INTERVAL * FLOWRATE_FRAME)
+                flowrate = flowrate * 3600 # Conversion to g/hr
+            if len(self.weights) >= 4:
+                flowrate_2 = (weight - self.weights[-4]) / (INTERVAL * 4)
+                flowrate_2 = flowrate_2 * 3600 # Conversion to g/hr
             self.weights.append(weight)
-            self.weight_display.update(f"{weight:.1f} kg")
-            self.outfile.write(f"{curr_time},{weight},{flowrate}\n")
+            self.weight_display.update(f"{weight:.1f} g")
+            assert(self.outfile is not None)
+            try:
+                self.outfile.write(f"{curr_time},{weight},{flowrate},{flowrate_2},{note}\n")
+            except PermissionError:
+                self.get_new_outfile()
+                self.outfile.write(f"{curr_time},{weight},{flowrate},{flowrate_2},{note}\n")
             curr_time = datetime.now().strftime("%H:%M:%S")
             self.n_measurements += 1
             self.status_label.update(
@@ -130,20 +150,33 @@ class FlowRateApp(App):
                 + f"Status: {stat}"
             )
             if flowrate > -100000:
-                self.flowrate_display.update(f"{flowrate:.1f} kg/s")
-            self.spark.refresh()
+                self.flowrate_display.update(f"{flowrate:.1f} g/hr")
+                self.flowrates[0].append(flowrate)
+            else:
+                self.flowrate_display.update("~.~ g/hr")
+            if flowrate_2 > -100000:
+                self.flowrate2_display.update(f"{flowrate_2:.1f} g/hr")
+                self.flowrates[0].append(flowrate_2)
+            else:
+                self.flowrate2_display.update("~.~ g/hr")
+            self.outfile.flush()
 
     def compose(self) -> ComposeResult:
+        self.update_weight        = self.set_interval(INTERVAL, self.read_weight,
+                                                      pause=True)
+        self.weight_display       = Digits("~.~ g", id="weight")
+        self.flowrate_display     = Digits("~.~ g/hr", id="flow")
+        self.flowrate2_display    = Digits("~.~ g/hr", id="flow2")
+        self.status_label         = Label("", id="status")
         yield Header(show_clock=True, name="NiMBLE: Scale and Flow Rate Meter")
 
         yield Label("Last Weight: ")
         yield self.weight_display
 
-        yield Label("Flowrate: ")
+        yield Label("Flowrate (12 hr, 2 hr): ")
         yield self.flowrate_display
-
+        yield self.flowrate2_display
         yield Label("Weight History: ")
-        yield self.spark
 
         yield Static()
         yield Button("Start", name="toggle", variant="success")
@@ -152,19 +185,13 @@ class FlowRateApp(App):
         yield self.status_label
 
         yield Label(
-            f"Update Frequency: {INTERVAL}s; " + f"Outfile: {OUT_FILE}", id="details"
+            f"Update Frequency: {INTERVAL}s; " + f"Outfile: {str(Path(self.OUT_FILE).absolute())}", id="details"
         )
 
     def on_mount(self) -> None:
         self.title                = "NiMBLE: Scale and Flow Rate Meter"
         self.screen.styles.border = ("round", "yellow")
-        self.update_weight        = self.set_interval(INTERVAL, self.read_weight,
-                                                      pause=True)
-        self.weight_display       = Digits("~.~ kg", id="weight")
-        self.flowrate_display     = Digits("~.~ kg/s", id="flow")
-        self.spark                = Sparkline(self.weights, summary_function=mean,
-                                              id="spark")
-        self.status_label         = Label("", id="status")
+        
 
 
 if __name__ == "__main__":
