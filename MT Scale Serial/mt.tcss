@@ -31,7 +31,6 @@ Header {
     content-align: center middle;
     text-style: bold;
 }
-
 Static {
     height: 50%;
 }
