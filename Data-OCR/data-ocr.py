@@ -6,9 +6,8 @@ import pyperclip
 from PIL import Image
 from google import genai
 from google.genai import errors
+from key import REMOVED
 
-# ⚠️ Replace this with your actual Gemini API key
-REMOVED = "REMOVED"
 
 def extract_and_process_sheets(image_path: Path, max_retries=5, initial_delay=4):
     client = genai.Client(api_key=REMOVED)

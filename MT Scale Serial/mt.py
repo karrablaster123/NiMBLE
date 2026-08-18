@@ -1,4 +1,6 @@
 #ty: ignore[unresolved-attribute]
+import bisect
+from typing import Optional
 import serial
 import csv
 from datetime import timedelta
@@ -23,13 +25,11 @@ from textual_plotext import PlotextPlot
 
 # --- Configuration & Constants ---
 PORT = "COM11"
-BAUDRATE = 9600
+BAUDRATE = 9_600
 INTERVAL = 30 * 60  # 30 minutes in seconds
-FLOWRATE_24H_FRAME = 48 # 48 * 30 mins = 24 hours
-FLOWRATE_2H_FRAME = 4    # 4 * 30 mins = 2 hours
 
-INVALID_FLOWRATE = -100000.0
-EFF_CLEAR_THRESHOLD = -1000.0
+INVALID_FLOWRATE = -100_000.0
+EFF_CLEAR_THRESHOLD = -1_000.0
 WEIGHT_RE = re.compile(r"(\d+\.\d+) kg")
 
 
@@ -50,6 +50,63 @@ def init_csv(filepath: Path) -> None:
     with open(filepath, "w") as f:
         f.write("Date & Time, Mass (g), Flowrate 24 (g/hr), Flowrate 2hr (g/hr), Note\n")
 
+def find_weight(
+    weights: list[tuple[str, float]], td: timedelta, search_dt: str | datetime
+) -> Optional[float]:
+
+    def get_dt(idx: int):
+        return datetime.strptime( weights[idx][0], "%Y-%m-%d %H:%M:%S")
+
+    if not weights:
+        return None
+
+    if isinstance(search_dt, str):
+        search_dt = datetime.strptime(search_dt, "%Y-%m-%d %H:%M:%S")
+
+    target_dt = search_dt - td
+    err_tol = timedelta(minutes=31)
+
+    # Assuming ~30 min interval (1800s per frame) counting back from the end
+    expected_frame_size = int(td.total_seconds() / 1800)
+    expected_idx = (len(weights) - 1) - expected_frame_size
+
+    if 0 <= expected_idx < len(weights):
+        dt_exp = get_dt(expected_idx)
+        diff_exp = abs(dt_exp - target_dt)
+
+        if diff_exp <= err_tol:
+            left_diff = (
+                abs(
+                    get_dt(expected_idx - 1)
+                    - target_dt
+                )
+                if expected_idx > 0
+                else timedelta.max
+            )
+            right_diff = (
+                abs(
+                    get_dt(expected_idx + 1)
+                    - target_dt
+                )
+                if expected_idx < len(weights) - 1
+                else timedelta.max
+            )
+
+            if diff_exp <= left_diff and diff_exp <= right_diff:
+                return weights[expected_idx][1]
+
+    target_str = target_dt.strftime("%Y-%m-%d %H:%M:%S")
+    idx = bisect.bisect_left(weights, target_str, key=lambda x: x[0])
+
+    candidates = []
+    for i in (idx - 1, idx):
+        if 0 <= i < len(weights):
+            dt = get_dt(i)
+            diff = abs(dt - target_dt)
+            if diff <= err_tol:
+                candidates.append((diff, weights[i][1]))
+
+    return min(candidates, key=lambda x: x[0])[1] if candidates else None
 
 def load_latest_data() -> tuple[Path, list, list, int]:
     """Finds the most recent file. Returns its data if < 1 day old, else returns a new file setup."""
@@ -124,10 +181,10 @@ class MainScreen(Screen):
         yield self.weight_display
 
         yield Label("Flowrate (24 hr, 2 hr): ")
-        self.flowrate_display = Digits("~.~ g/hr", id="flow")
-        self.flowrate2_display = Digits("~.~ g/hr", id="flow2")
-        yield self.flowrate_display
-        yield self.flowrate2_display
+        self.flowrate_24hr_display = Digits("~.~ g/hr", id="flow")
+        self.flowrate_2hr_display = Digits("~.~ g/hr", id="flow2")
+        yield self.flowrate_24hr_display
+        yield self.flowrate_2hr_display
 
         yield Label("Controls: ")
         yield Button("Start", name="toggle", variant="success", id="toggle-btn")
@@ -143,8 +200,8 @@ class MainScreen(Screen):
         # Link UI components to the App's state updater
         self.app.ui_status_label = self.status_label
         self.app.ui_weight_display = self.weight_display
-        self.app.ui_flowrate_display = self.flowrate_display
-        self.app.ui_flowrate2_display = self.flowrate2_display
+        self.ui_flowrate_24hr_display = self.flowrate_24hr_display 
+        self.ui_flowrate_2hr_display = self.flowrate_2hr_display 
         self.query_one("#details", Label).update(
                 f"Update Frequency: {INTERVAL}s; Outfile: {self.app.outfile.absolute()}"
                 )
@@ -296,7 +353,7 @@ class FlowRateApp(App):
         curr_datetime = datetime.now()
         curr_time_full = curr_datetime.strftime("%Y-%m-%d %H:%M:%S")
         curr_time_short = curr_datetime.strftime("%H:%M:%S")
-        
+
         response = read_weight_from_serial(self.ser)
 
         if not response:
@@ -327,17 +384,21 @@ class FlowRateApp(App):
             self.weights.clear()
             note = "EFFCLEAR"
 
-        # Calculate Flowrates
+        # Calculate Flowrates using find_weight
         flowrate_24 = INVALID_FLOWRATE
         flowrate_2 = INVALID_FLOWRATE
 
-        if len(self.weights) >= FLOWRATE_24H_FRAME:
-            flowrate_24 = (weight - self.weights[-FLOWRATE_24H_FRAME][1]) / (INTERVAL * FLOWRATE_24H_FRAME)
-            flowrate_24 *= 3600  # Conversion to g/hr
+        past_weight_24 = find_weight(
+            self.weights, timedelta(hours=24), curr_datetime
+        )
+        if past_weight_24 is not None:
+            flowrate_24 = (weight - past_weight_24) / 24.0  # g/hr
 
-        if len(self.weights) >= FLOWRATE_2H_FRAME:
-            flowrate_2 = (weight - self.weights[-FLOWRATE_2H_FRAME][1]) / (INTERVAL * FLOWRATE_2H_FRAME)
-            flowrate_2 *= 3600  # Conversion to g/hr
+        past_weight_2 = find_weight(
+            self.weights, timedelta(hours=2), curr_datetime
+        )
+        if past_weight_2 is not None:
+            flowrate_2 = (weight - past_weight_2) / 2.0  # g/hr
 
         # State updates: Store as (Timestamp, Value) tuples!
         self.weights.append((curr_time_full, weight))
@@ -346,13 +407,17 @@ class FlowRateApp(App):
         # File output (atomic append)
         try:
             with open(self.outfile, "a") as f:
-                f.write(f"{curr_time_full},{weight},{flowrate_24},{flowrate_2},{note}\n")
+                f.write(
+                    f"{curr_time_full},{weight},{flowrate_24},{flowrate_2},{note}\n"
+                )
         except PermissionError:
             # Fallback if file is locked
             self.outfile = get_valid_filename()
             init_csv(self.outfile)
             with open(self.outfile, "a") as f:
-                f.write(f"{curr_time_full},{weight},{flowrate_24},{flowrate_2},{note}\n")
+                f.write(
+                    f"{curr_time_full},{weight},{flowrate_24},{flowrate_2},{note}\n"
+                )
 
         # UI Updates
         if self.ui_weight_display:
