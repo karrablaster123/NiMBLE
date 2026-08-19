@@ -18,7 +18,6 @@ from textual.widgets import (
         Header,
         Footer,
         Button,
-        Static,
         Digits,
         )
 from textual_plotext import PlotextPlot
@@ -44,11 +43,61 @@ def get_valid_filename() -> Path:
         n += 1
     return filename
 
-
 def init_csv(filepath: Path) -> None:
     """Initializes the CSV with headers if it is newly created."""
     with open(filepath, "w") as f:
-        f.write("Date & Time, Mass (g), Flowrate 24 (g/hr), Flowrate 2hr (g/hr), Note\n")
+        # Added Raw Mass and Cumulative Mass columns
+        f.write("Date & Time,Raw Mass (g),Cumulative Mass (g),Flowrate 24 (g/hr),Flowrate 2hr (g/hr),Note\n")
+
+def load_latest_data() -> tuple[Path, list, list, int, float, Optional[float]]:
+    """Finds the most recent file. Returns its data if < 1 day old, else returns a new file setup."""
+    files = sorted(Path('.').glob("Mass-*.csv"), key=lambda p: p.stat().st_mtime)
+    if not files:
+        return get_valid_filename(), [], [[], []], 0, 0.0, None
+
+    latest_file = files[-1]
+    weights, flowrates = [], [[], []]
+    
+    tare_offset = 0.0
+    last_raw_weight = None
+    
+    try:
+        with open(latest_file, "r") as f:
+            reader = csv.reader(f)
+            next(reader, None)  # Skip header
+            for row in reader:
+                if len(row) >= 5:
+                    dt = row[0]
+                    # Handle backwards compatibility with old 5-column files
+                    if len(row) >= 6:
+                        raw_w, cum_w = float(row[1]), float(row[2])
+                        f24, f2 = float(row[3]), float(row[4])
+                    else:
+                        raw_w = float(row[1])
+                        cum_w = raw_w  # No cumulative column existed yet
+                        f24, f2 = float(row[2]), float(row[3])
+
+                    # Load CUMULATIVE weight into the array for flowrate logic
+                    weights.append((dt, cum_w))
+                    
+                    # Track latest state so offset survives a program restart
+                    last_raw_weight = raw_w
+                    tare_offset = cum_w - raw_w
+
+                    if f24 > INVALID_FLOWRATE: 
+                        flowrates[0].append((dt, f24))
+                    if f2 > INVALID_FLOWRATE:  
+                        flowrates[1].append((dt, f2))
+        
+        if weights:
+            last_time = datetime.strptime(weights[-1][0], "%Y-%m-%d %H:%M:%S")
+            if datetime.now() - last_time < timedelta(days=1):
+                # Now returns 6 items to recover tare state
+                return latest_file, weights, flowrates, len(weights), tare_offset, last_raw_weight
+    except Exception as e:
+        print(f"Warning: Failed to parse existing file ({e}). Starting fresh.")
+
+    return get_valid_filename(), [], [[], []], 0, 0.0, None
 
 def find_weight(
     weights: list[tuple[str, float]], td: timedelta, search_dt: str | datetime
@@ -108,38 +157,6 @@ def find_weight(
 
     return min(candidates, key=lambda x: x[0])[1] if candidates else None
 
-def load_latest_data() -> tuple[Path, list, list, int]:
-    """Finds the most recent file. Returns its data if < 1 day old, else returns a new file setup."""
-    files = sorted(Path('.').glob("Mass-*.csv"), key=lambda p: p.stat().st_mtime)
-    if not files:
-        return get_valid_filename(), [], [[], []], 0
-
-    latest_file = files[-1]
-    weights, flowrates = [], [[], []]
-    
-    try:
-        with open(latest_file, "r") as f:
-            reader = csv.reader(f)
-            next(reader, None)  # Skip header
-            for row in reader:
-                if len(row) >= 4:
-                    dt, w, f24, f2 = row[0], float(row[1]), float(row[2]), float(row[3])
-                    weights.append((dt, w))
-                    if f24 > INVALID_FLOWRATE: 
-                        flowrates[0].append((dt, f24))
-                    if f2 > INVALID_FLOWRATE:  
-                        flowrates[1].append((dt, f2))
-        
-        if weights:
-            last_time = datetime.strptime(weights[-1][0], "%Y-%m-%d %H:%M:%S")
-            if datetime.now() - last_time < timedelta(days=1):
-                return latest_file, weights, flowrates, len(weights)
-    except Exception as e:
-        print(f"Warning: Failed to parse existing file ({e}). Starting fresh.")
-        
-    return get_valid_filename(), [], [[], []], 0
-
-
 def read_weight_from_serial(ser: serial.Serial) -> str:
     """Sends command to scale and reads the response."""
     try:
@@ -169,27 +186,35 @@ def get_stat(r: str) -> tuple[int, str]:
         case _:   
             return (-100, f"Something went wrong! {r}")
 
-
 class MainScreen(Screen):
     """The primary screen for displaying current metrics."""
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True, name="NiMBLE: Scale and Flow Rate Meter")
 
-        yield Label("Last Weight: ")
+        # 1. Row 1: Weights (Embedded Titles)
+        self.raw_weight_display = Digits("~.~ g", id="raw-weight")
+        self.raw_weight_display.border_title = "Raw Weight"
+        yield self.raw_weight_display
+
         self.weight_display = Digits("~.~ g", id="weight")
+        self.weight_display.border_title = "Cumulative Weight"
         yield self.weight_display
 
-        yield Label("Flowrate (24 hr, 2 hr): ")
+        # 2. Row 2: Flowrates (Embedded Titles)
         self.flowrate_24hr_display = Digits("~.~ g/hr", id="flow")
-        self.flowrate_2hr_display = Digits("~.~ g/hr", id="flow2")
+        self.flowrate_24hr_display.border_title = "Flowrate (24 hr)"
         yield self.flowrate_24hr_display
+
+        self.flowrate_2hr_display = Digits("~.~ g/hr", id="flow2")
+        self.flowrate_2hr_display.border_title = "Flowrate (2 hr)"
         yield self.flowrate_2hr_display
 
-        yield Label("Controls: ")
+        # 3. Row 3: Buttons
         yield Button("Start", name="toggle", variant="success", id="toggle-btn")
+        yield Button("Eff Bucket Replaced", name="tare", variant="primary", id="tare-btn")
 
-        yield Static()
+        # 4. Row 4: Status and Footer
         self.status_label = Label("Status: Waiting to start...", id="status")
         yield self.status_label
 
@@ -200,8 +225,10 @@ class MainScreen(Screen):
         # Link UI components to the App's state updater
         self.app.ui_status_label = self.status_label
         self.app.ui_weight_display = self.weight_display
-        self.ui_flowrate_24hr_display = self.flowrate_24hr_display 
-        self.ui_flowrate_2hr_display = self.flowrate_2hr_display 
+        self.app.ui_raw_weight_display = self.raw_weight_display
+        # Fix: Added `self.app.` to properly link these to FlowRateApp
+        self.app.ui_flowrate_24hr_display = self.flowrate_24hr_display 
+        self.app.ui_flowrate_2hr_display = self.flowrate_2hr_display 
         self.query_one("#details", Label).update(
                 f"Update Frequency: {INTERVAL}s; Outfile: {self.app.outfile.absolute()}"
                 )
@@ -218,6 +245,10 @@ class MainScreen(Screen):
                 button.label = "Start"
                 button.variant = "success"
                 self.app.update_timer.pause()
+        elif button.id == "tare-btn":
+            # 2. Trigger manual tare condition
+            self.app.manual_tare_requested = True
+            self.app.perform_measurement() # Execute immediately
 
 class HistoryScreen(Screen):
     """Screen for displaying plots of weight and flowrates over time."""
@@ -312,14 +343,21 @@ class FlowRateApp(App):
     def __init__(self):
         super().__init__()
         # Data storage and File setup
-        self.outfile, self.weights, self.flowrates, self.n_measurements = load_latest_data()
-        
+        (self.outfile, 
+         self.weights, 
+         self.flowrates, 
+         self.n_measurements, 
+         self.tare_offset, 
+         self.last_raw_weight) = load_latest_data()
+        self.manual_tare_requested = False
+
         if not self.outfile.exists():
             init_csv(self.outfile)
 
         # UI References (populated by MainScreen)
         self.ui_status_label = None
         self.ui_weight_display = None
+        self.ui_raw_weight_display = None
         self.ui_flowrate_24hr_display = None
         self.ui_flowrate_2hr_display = None
 
@@ -376,15 +414,25 @@ class FlowRateApp(App):
             return
 
         # Parse Weight
-        weight = round(float(matches.groups()[0]) * 1000.0, 1)  # kg to g
+        raw_weight = round(float(matches.groups()[0]) * 1000.0, 1)  # kg to g
         note = ""
 
-        # Handle massive drops in weight (Note: index [1] grabs the weight from the tuple)
-        if self.weights and (weight - self.weights[-1][1]) < EFF_CLEAR_THRESHOLD:
-            self.weights.clear()
-            note = "EFFCLEAR"
+        if self.last_raw_weight is None:
+            self.last_raw_weight = raw_weight
 
-        # Calculate Flowrates using find_weight
+        # 1 & 2. Handle automatic drops and manual button presses
+        if (raw_weight - self.last_raw_weight) < EFF_CLEAR_THRESHOLD or self.manual_tare_requested:
+            # Shift the offset up by the exact amount the scale dropped
+            # This makes the transition completely seamless for cumulative tracking
+            self.tare_offset += (self.last_raw_weight - raw_weight)
+            note = "EFFCLEAR-Manual" if self.manual_tare_requested else "EFFCLEAR-Auto"
+            self.manual_tare_requested = False
+
+        # 3. Calculate Cumulative Weight
+        cumulative_weight = raw_weight + self.tare_offset
+        self.last_raw_weight = raw_weight
+
+        # 4. Calculate Flowrates using cumulative_weight
         flowrate_24 = INVALID_FLOWRATE
         flowrate_2 = INVALID_FLOWRATE
 
@@ -392,36 +440,38 @@ class FlowRateApp(App):
             self.weights, timedelta(hours=24), curr_datetime
         )
         if past_weight_24 is not None:
-            flowrate_24 = (weight - past_weight_24) / 24.0  # g/hr
+            flowrate_24 = (cumulative_weight - past_weight_24) / 24.0  # g/hr
 
         past_weight_2 = find_weight(
             self.weights, timedelta(hours=2), curr_datetime
         )
         if past_weight_2 is not None:
-            flowrate_2 = (weight - past_weight_2) / 2.0  # g/hr
+            flowrate_2 = (cumulative_weight - past_weight_2) / 2.0  # g/hr
 
-        # State updates: Store as (Timestamp, Value) tuples!
-        self.weights.append((curr_time_full, weight))
+        # State updates: Store as (Timestamp, Cumulative Value) tuples!
+        # By storing cumulative weight in `self.weights`, `find_weight` computes rates properly across tares
+        self.weights.append((curr_time_full, cumulative_weight))
         self.n_measurements += 1
 
         # File output (atomic append)
+        # Note: Added raw_weight column!
+        row_data = f"{curr_time_full},{raw_weight},{cumulative_weight},{flowrate_24},{flowrate_2},{note}\n"
         try:
             with open(self.outfile, "a") as f:
-                f.write(
-                    f"{curr_time_full},{weight},{flowrate_24},{flowrate_2},{note}\n"
-                )
+                f.write(row_data)
         except PermissionError:
             # Fallback if file is locked
             self.outfile = get_valid_filename()
             init_csv(self.outfile)
             with open(self.outfile, "a") as f:
-                f.write(
-                    f"{curr_time_full},{weight},{flowrate_24},{flowrate_2},{note}\n"
-                )
+                f.write(row_data)
 
         # UI Updates
+        if self.ui_raw_weight_display:
+            self.ui_raw_weight_display.update(f"{raw_weight:.1f} g")
+
         if self.ui_weight_display:
-            self.ui_weight_display.update(f"{weight:.1f} g")
+            self.ui_weight_display.update(f"{cumulative_weight:.1f} g")
 
         if flowrate_24 > INVALID_FLOWRATE:
             self.flowrates[0].append((curr_time_full, flowrate_24))
