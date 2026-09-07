@@ -1,0 +1,8 @@
+2026-09-07 12:38:40,969 - __main__ - INFO - Logging started!
+2026-09-07 12:38:40,978 - __main__ - INFO - Loaded Mass-2026-08-18_2.csv
+2026-09-07 12:38:40,979 - __main__ - INFO - Unable to connect to serial port
+2026-09-07 12:38:40,979 - __main__ - INFO - [Errno 2] could not open port COM11: [Errno 2] No such file or directory: 'COM11'
+2026-09-07 12:40:08,595 - __main__ - INFO - Logging started!
+2026-09-07 12:40:08,600 - __main__ - INFO - Loaded Mass-2026-09-07.csv
+2026-09-07 12:40:08,600 - __main__ - INFO - Unable to connect to serial port
+2026-09-07 12:40:08,600 - __main__ - INFO - [Errno 2] could not open port COM11: [Errno 2] No such file or directory: 'COM11'

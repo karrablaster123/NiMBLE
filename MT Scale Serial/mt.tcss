@@ -67,3 +67,12 @@ PlotextPlot {
     width: 1fr;
     height: 1fr;
 }
+
+DataScreen {
+    layout: vertical;      /* Overrides the 2-column grid from the base Screen */
+}
+
+#data-table {
+    width: 100%;
+    height: 1fr;           /* Tells the table to fill the available vertical space */
+}
